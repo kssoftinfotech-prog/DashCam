@@ -5,11 +5,19 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path/path.dart' as p;
 import 'package:flutter/services.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 late List<CameraDescription> cameras;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Lock orientation to portrait mode
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
   cameras = await availableCameras();
   runApp(const DashcamApp());
 }
@@ -56,6 +64,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     controller?.dispose();
     _durationController.dispose();
     _maxFilesController.dispose();
@@ -65,9 +74,15 @@ class _DashcamScreenState extends State<DashcamScreen> {
   Future<void> init() async {
     await requestPermissions();
 
+    // Keep screen on while the app is running
+    WakelockPlus.enable();
+
+    // Hide status bar and navigation bar for true full screen
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
     controller = CameraController(
       cameras.first,
-      ResolutionPreset.medium,
+      ResolutionPreset.high, // Higher resolution for dashcam
       enableAudio: true,
     );
 
@@ -307,7 +322,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
                     child: Row(
                       children: [
                         const Text(
-                          "DASHCAM",
+                          "SETTINGS",
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 18,
