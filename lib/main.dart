@@ -69,13 +69,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       "icon": "🚗",
     },
     {
-      "title": "Loop Recording",
-      "description": "Automatically saves video segments and manages storage by deleting old files.",
+      "title": "Customizable Recording",
+      "description": "You can set the duration of each video and the maximum number of files in the settings.",
+      "icon": "⚙️",
+    },
+    {
+      "title": "Smart Loop Recording",
+      "description": "The oldest file will be automatically replaced with a new one once your 'Max Number of Files' limit is reached.",
       "icon": "🔄",
     },
     {
       "title": "Full Screen View",
-      "description": "Immersive camera preview with easy-to-use controls.",
+      "description": "Immersive camera preview with easy-to-use controls to start and stop your journey.",
       "icon": "📸",
     },
   ];
@@ -266,6 +271,16 @@ class _DashcamScreenState extends State<DashcamScreen> {
           ],
         ),
         actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const OnboardingScreen()),
+              );
+            },
+            child: const Text("Show Tutorial"),
+          ),
           TextButton(
             onPressed: () {
               setState(() {
