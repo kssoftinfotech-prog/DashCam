@@ -208,6 +208,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
   int recordDuration = 30;
   int maxFiles = 5;
+  ResolutionPreset selectedResolution = ResolutionPreset.high;
 
   Timer? loopTimer;
 
@@ -242,7 +243,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
     controller = CameraController(
       cameras.first,
-      ResolutionPreset.high, // Higher resolution for dashcam
+      selectedResolution,
       enableAudio: true,
     );
 
@@ -251,47 +252,91 @@ class _DashcamScreenState extends State<DashcamScreen> {
   }
 
   void _showSettings() {
+    ResolutionPreset tempResolution = selectedResolution;
+
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("Settings"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: _durationController,
-              decoration: const InputDecoration(labelText: "Segment Duration (seconds)"),
-              keyboardType: TextInputType.number,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text("Settings"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _durationController,
+                decoration: const InputDecoration(labelText: "Segment Duration (seconds)"),
+                keyboardType: TextInputType.number,
+              ),
+              TextField(
+                controller: _maxFilesController,
+                decoration: const InputDecoration(labelText: "Max Number of Files"),
+                keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text("Resolution:"),
+                  DropdownButton<ResolutionPreset>(
+                    value: tempResolution,
+                    items: const [
+                      DropdownMenuItem(value: ResolutionPreset.low, child: Text("Low (240p)")),
+                      DropdownMenuItem(value: ResolutionPreset.medium, child: Text("Medium (480p)")),
+                      DropdownMenuItem(value: ResolutionPreset.high, child: Text("High (720p)")),
+                      DropdownMenuItem(value: ResolutionPreset.veryHigh, child: Text("Very High (1080p)")),
+                      DropdownMenuItem(value: ResolutionPreset.ultraHigh, child: Text("4K (2160p)")),
+                      DropdownMenuItem(value: ResolutionPreset.max, child: Text("Max Available")),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setDialogState(() => tempResolution = value);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const OnboardingScreen()),
+                );
+              },
+              child: const Text("Show Tutorial"),
             ),
-            TextField(
-              controller: _maxFilesController,
-              decoration: const InputDecoration(labelText: "Max Number of Files"),
-              keyboardType: TextInputType.number,
+            TextButton(
+              onPressed: () async {
+                final oldResolution = selectedResolution;
+                final oldController = controller;
+
+                if (oldResolution != tempResolution) {
+                  // 1. Remove preview from UI immediately
+                  setState(() {
+                    controller = null;
+                  });
+                }
+
+                setState(() {
+                  recordDuration = int.tryParse(_durationController.text) ?? 30;
+                  maxFiles = int.tryParse(_maxFilesController.text) ?? 5;
+                  selectedResolution = tempResolution;
+                });
+                Navigator.pop(context);
+
+                // 2. Re-initialize if resolution changed
+                if (oldResolution != selectedResolution) {
+                  await oldController?.dispose();
+                  await init();
+                }
+              },
+              child: const Text("Save"),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const OnboardingScreen()),
-              );
-            },
-            child: const Text("Show Tutorial"),
-          ),
-          TextButton(
-            onPressed: () {
-              setState(() {
-                recordDuration = int.tryParse(_durationController.text) ?? 30;
-                maxFiles = int.tryParse(_maxFilesController.text) ?? 5;
-              });
-              Navigator.pop(context);
-            },
-            child: const Text("Save"),
-          ),
-        ],
       ),
     );
   }
@@ -475,40 +520,28 @@ class _DashcamScreenState extends State<DashcamScreen> {
             ),
           ),
 
-          // 2. Top Overlay (App Name / Status)
+          // 2. Top Overlay (Settings Icon)
           Positioned(
             top: 40,
             left: 20,
-            child: Row(
-              children: [
-                GestureDetector(
-                  onTap: isRecording ? null : _showSettings,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: Colors.black45,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        const Text(
-                          "SETTINGS",
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 2,
-                          ),
-                        ),
-                        if (!isRecording) ...[
-                          const SizedBox(width: 10),
-                          const Icon(Icons.settings, color: Colors.white, size: 20),
-                        ],
-                      ],
-                    ),
+            child: Tooltip(
+              message: "Settings",
+              triggerMode: TooltipTriggerMode.tap,
+              child: GestureDetector(
+                onTap: isRecording ? null : _showSettings,
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: const BoxDecoration(
+                    color: Colors.black45,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.settings,
+                    color: Colors.white,
+                    size: 24,
                   ),
                 ),
-              ],
+              ),
             ),
           ),
 
