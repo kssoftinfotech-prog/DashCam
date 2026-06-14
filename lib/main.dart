@@ -7,16 +7,19 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
+import 'package:intl/intl.dart';
 
 late List<CameraDescription> cameras;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Lock orientation to portrait mode
+  // Lock orientation to landscape mode
   await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
   ]);
 
   cameras = await availableCameras();
@@ -100,32 +103,44 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             },
             itemCount: _pages.length,
             itemBuilder: (context, index) {
-              return Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+              return Row(
                 children: [
-                  Text(
-                    _pages[index]["icon"]!,
-                    style: const TextStyle(fontSize: 100),
-                  ),
-                  const SizedBox(height: 40),
-                  Text(
-                    _pages[index]["title"]!,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
+                  Expanded(
+                    flex: 1,
+                    child: Center(
+                      child: Text(
+                        _pages[index]["icon"]!,
+                        style: const TextStyle(fontSize: 120),
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 20),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 40),
-                    child: Text(
-                      _pages[index]["description"]!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.grey,
-                        fontSize: 16,
-                      ),
+                  Expanded(
+                    flex: 1,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _pages[index]["title"]!,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Padding(
+                          padding: const EdgeInsets.only(right: 40),
+                          child: Text(
+                            _pages[index]["description"]!,
+                            textAlign: TextAlign.left,
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 18,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -148,7 +163,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       height: 8,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: _currentPage == index ? Colors.white : Colors.grey,
+                        color: _currentPage == index ? Colors.white : Colors.green,
                       ),
                     ),
                   ),
@@ -206,15 +221,16 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
   bool isRecording = false;
 
-  int recordDuration = 30;
+  int recordDuration = 120;
   int maxFiles = 5;
   ResolutionPreset selectedResolution = ResolutionPreset.high;
 
-  Timer? loopTimer;
+  Timer? _clockTimer;
+  String _currentTime = "";
 
   static const platform = MethodChannel('media_scanner');
 
-  final TextEditingController _durationController = TextEditingController(text: "30");
+  final TextEditingController _durationController = TextEditingController(text: "120");
   final TextEditingController _maxFilesController = TextEditingController(text: "5");
 
   @override
@@ -226,6 +242,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
   @override
   void dispose() {
     WakelockPlus.disable();
+    _clockTimer?.cancel();
     controller?.dispose();
     _durationController.dispose();
     _maxFilesController.dispose();
@@ -241,43 +258,121 @@ class _DashcamScreenState extends State<DashcamScreen> {
     // Hide status bar and navigation bar for true full screen
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-    controller = CameraController(
-      cameras.first,
-      selectedResolution,
-      enableAudio: true,
-    );
+    // Start clock timer for the UI overlay
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          _currentTime = DateFormat('dd-MM-yyyy HH:mm:ss').format(DateTime.now());
+        });
+      }
+    });
 
-    await controller!.initialize();
+    if (controller == null) {
+      controller = CameraController(
+        cameras.first,
+        selectedResolution,
+        enableAudio: true,
+      );
+      await controller!.initialize();
+    }
+    
     if (mounted) setState(() {});
   }
 
-  void _showSettings() {
+  void _showSettings() { 
     ResolutionPreset tempResolution = selectedResolution;
+    int tempDuration = recordDuration;
+    int tempMaxFiles = maxFiles;
 
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text("Settings"),
+          scrollable: true,
+          title: const Text("Dashcam Settings"),
           content: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              TextField(
-                controller: _durationController,
-                decoration: const InputDecoration(labelText: "Segment Duration (seconds)"),
-                keyboardType: TextInputType.number,
-              ),
-              TextField(
-                controller: _maxFilesController,
-                decoration: const InputDecoration(labelText: "Max Number of Files"),
-                keyboardType: TextInputType.number,
-              ),
-              const SizedBox(height: 20),
+              // 1. Video Duration
+              const Text("Video Duration", style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text("Resolution:"),
-                  DropdownButton<ResolutionPreset>(
+                  _presetButton("1m", 60, tempDuration, (v) => setDialogState(() => tempDuration = v)),
+                  _presetButton("2m", 120, tempDuration, (v) => setDialogState(() => tempDuration = v)),
+                  _presetButton("3m", 180, tempDuration, (v) => setDialogState(() => tempDuration = v)),
+                  _presetButton("5m", 300, tempDuration, (v) => setDialogState(() => tempDuration = v)),
+                ],
+              ),
+              const SizedBox(height: 5),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    onPressed: () {
+                      if (tempDuration > 10) setDialogState(() => tempDuration -= 10);
+                    },
+                    icon: const Icon(Icons.remove_circle_outline, size: 30),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text("$tempDuration sec", style: const TextStyle(fontSize: 18)),
+                  ),
+                  IconButton(
+                    onPressed: () => setDialogState(() => tempDuration += 10),
+                    icon: const Icon(Icons.add_circle_outline, size: 30),
+                  ),
+                ],
+              ),
+
+              const Divider(height: 40),
+
+              // 2. Max Number of Files
+              const Text("Max Number of Files", style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    onPressed: () {
+                      if (tempMaxFiles > 1) setDialogState(() => tempMaxFiles -= 1);
+                    },
+                    icon: const Icon(Icons.remove_circle_outline, size: 30),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text("$tempMaxFiles files", style: const TextStyle(fontSize: 18)),
+                  ),
+                  IconButton(
+                    onPressed: () => setDialogState(() => tempMaxFiles += 1),
+                    icon: const Icon(Icons.add_circle_outline, size: 30),
+                  ),
+                ],
+              ),
+
+              const Divider(height: 40),
+
+              // 3. Resolution
+              const Text("Camera Resolution", style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade300),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<ResolutionPreset>(
+                    isExpanded: true,
                     value: tempResolution,
                     items: const [
                       DropdownMenuItem(value: ResolutionPreset.low, child: Text("Low (240p)")),
@@ -293,7 +388,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
                       }
                     },
                   ),
-                ],
+                ),
               ),
             ],
           ),
@@ -308,34 +403,57 @@ class _DashcamScreenState extends State<DashcamScreen> {
               },
               child: const Text("Show Tutorial"),
             ),
-            TextButton(
+            ElevatedButton(
               onPressed: () async {
                 final oldResolution = selectedResolution;
                 final oldController = controller;
 
                 if (oldResolution != tempResolution) {
-                  // 1. Remove preview from UI immediately
                   setState(() {
                     controller = null;
                   });
                 }
 
                 setState(() {
-                  recordDuration = int.tryParse(_durationController.text) ?? 30;
-                  maxFiles = int.tryParse(_maxFilesController.text) ?? 5;
+                  recordDuration = tempDuration;
+                  maxFiles = tempMaxFiles;
                   selectedResolution = tempResolution;
+                  _durationController.text = tempDuration.toString();
+                  _maxFilesController.text = tempMaxFiles.toString();
                 });
                 Navigator.pop(context);
 
-                // 2. Re-initialize if resolution changed
                 if (oldResolution != selectedResolution) {
                   await oldController?.dispose();
                   await init();
                 }
               },
-              child: const Text("Save"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text("Save Settings"),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _presetButton(String label, int value, int current, Function(int) onTap) {
+    bool isSelected = value == current;
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: OutlinedButton(
+          onPressed: () => onTap(value),
+          style: OutlinedButton.styleFrom(
+            padding: EdgeInsets.zero,
+            backgroundColor: isSelected ? Colors.black : Colors.transparent,
+            foregroundColor: isSelected ? Colors.white : Colors.black,
+            side: BorderSide(color: isSelected ? Colors.black : Colors.grey.shade300),
+          ),
+          child: Text(label),
         ),
       ),
     );
@@ -359,135 +477,113 @@ class _DashcamScreenState extends State<DashcamScreen> {
     }
   }
 
-  void startLoopRecording() {
-    isRecording = true;
-    setState(() {});
-    _runRecordingLoop();
+  Future<void> startLoopRecording() async {
+    if (isRecording) return;
+
+    final Directory dir = Directory('/storage/emulated/0/Movies/Dashcam');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+
+    try {
+      isRecording = true;
+      setState(() {});
+      
+      _runRecordingLoop(dir.path);
+    } catch (e) {
+      debugPrint("Recording start error: $e");
+      isRecording = false;
+      setState(() {});
+    }
   }
 
-  Future<void> _runRecordingLoop() async {
-    // Start the first segment
-    await recordSegment();
-
+  Future<void> _runRecordingLoop(String folderPath) async {
     while (isRecording) {
-      await Future.delayed(Duration(seconds: recordDuration));
-      if (!isRecording) break;
-      await recordSegment();
+      try {
+        if (controller == null || !controller!.value.isInitialized) break;
+
+        final startTime = DateTime.now();
+        
+        // Use prepare to warm up the encoder
+        await controller!.prepareForVideoRecording();
+        
+        // 1. Start the recording
+        await controller!.startVideoRecording();
+        
+        // 2. Wait for the duration minus a small offset
+        await Future.delayed(Duration(milliseconds: (recordDuration * 1000) - 500));
+        
+        if (!isRecording) break;
+
+        // 3. Stop the current recording
+        final file = await controller!.stopVideoRecording();
+        
+        // 4. Process in background (burn timestamp)
+        unawaited(_processVideo(file.path, folderPath, startTime));
+        
+        // Loop immediately continues
+      } catch (e) {
+        debugPrint("Loop error: $e");
+        await Future.delayed(const Duration(seconds: 1));
+      }
     }
+  }
+
+  Future<void> _processVideo(String tempPath, String folderPath, DateTime startTime) async {
+    final String timestampBase = (startTime.millisecondsSinceEpoch / 1000).floor().toString();
+    final String newPath = p.join(folderPath, "VID_${DateTime.now().millisecondsSinceEpoch}.mp4");
+
+    debugPrint("FFmpeg processing: $tempPath");
+
+    // FFmpeg command to burn timestamp
+    final String command = "-i $tempPath -vf \"drawtext=fontfile=/system/fonts/Roboto-Regular.ttf:text='%{pts\\:localtime\\:$timestampBase}':x=w-tw-20:y=h-th-20:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5\" -c:v libx264 -preset ultrafast -c:a copy $newPath";
+
+    final session = await FFmpegKit.execute(command);
+    final returnCode = await session.getReturnCode();
+
+    if (ReturnCode.isSuccess(returnCode)) {
+      debugPrint("Video processed: $newPath");
+      await File(tempPath).delete();
+      await platform.invokeMethod('scanFile', {"path": newPath});
+      _deleteOldFiles(Directory(folderPath));
+    } else {
+      debugPrint("FFmpeg failed. Saving raw.");
+      final savedPath = p.join(folderPath, "VID_RAW_${DateTime.now().millisecondsSinceEpoch}.mp4");
+      await File(tempPath).copy(savedPath);
+      await File(tempPath).delete();
+      await platform.invokeMethod('scanFile', {"path": savedPath});
+    }
+  }
+
+  Future<void> _deleteOldFiles(Directory dir) async {
+    try {
+      final List<FileSystemEntity> entities = dir.listSync();
+      final List<File> dashcamFiles = entities
+          .whereType<File>()
+          .where((file) => p.basename(file.path).startsWith("VID_"))
+          .toList();
+
+      if (dashcamFiles.length > maxFiles) {
+        dashcamFiles.sort((a, b) => a.statSync().modified.compareTo(b.statSync().modified));
+        int toDeleteCount = dashcamFiles.length - maxFiles;
+        for (int i = 0; i < toDeleteCount; i++) {
+          await dashcamFiles[i].delete();
+          await platform.invokeMethod('scanFile', {"path": dashcamFiles[i].path});
+        }
+      }
+    } catch (e) {}
   }
 
   Future<void> stopLoopRecording() async {
+    if (!isRecording) return;
+    
     isRecording = false;
-    loopTimer?.cancel(); // Safety for old code
     if (controller != null && controller!.value.isRecordingVideo) {
-      try {
-        final file = await controller!.stopVideoRecording();
-        await saveAndManageFiles(file.path);
-      } catch (e) {
-        debugPrint("Stop recording error: $e");
-      }
+      final file = await controller!.stopVideoRecording();
+      final dir = Directory('/storage/emulated/0/Movies/Dashcam');
+      unawaited(_processVideo(file.path, dir.path, DateTime.now().subtract(Duration(seconds: recordDuration))));
     }
     setState(() {});
-  }
-
-  Future<void> recordSegment() async {
-    if (controller == null || !controller!.value.isInitialized || !isRecording) return;
-
-    try {
-      // If already recording, stop it and save it
-      if (controller!.value.isRecordingVideo) {
-        final file = await controller!.stopVideoRecording();
-        // Start saving in background so we can start the next recording immediately
-        saveAndManageFiles(file.path);
-      }
-
-      // Start the next recording
-      if (isRecording) {
-        await controller!.startVideoRecording();
-      }
-    } catch (e) {
-      debugPrint("Recording error: $e");
-    }
-  }
-
-  Future<void> saveAndManageFiles(String tempPath) async {
-    try {
-      // Using a more standard path for Android
-      final Directory dir = Directory('/storage/emulated/0/Movies/Dashcam');
-
-      if (!await dir.exists()) {
-        await dir.create(recursive: true);
-      }
-
-      final fileName = "VID_${DateTime.now().millisecondsSinceEpoch}.mp4";
-      final newPath = p.join(dir.path, fileName);
-
-      final File tempFile = File(tempPath);
-      if (await tempFile.exists()) {
-        final newFile = await tempFile.copy(newPath);
-        // Important: Delete temp file after copy
-        await tempFile.delete();
-
-        debugPrint("Video saved to: ${newFile.path}");
-
-        // 🔥 Notify Android Gallery
-        await platform.invokeMethod('scanFile', {"path": newFile.path});
-      }
-
-      await deleteOldFiles(dir);
-    } catch (e) {
-      debugPrint("Save error: $e");
-    }
-  }
-
-  Future<void> deleteOldFiles(Directory dir) async {
-    try {
-      final List<FileSystemEntity> entities = dir.listSync();
-      
-      // Filter for our dashcam files only
-      final List<File> dashcamFiles = entities
-          .whereType<File>()
-          .where((file) {
-            final name = p.basename(file.path);
-            return name.startsWith("VID_") && name.toLowerCase().endsWith(".mp4");
-          })
-          .toList();
-
-      debugPrint("Found ${dashcamFiles.length} dashcam videos. (Limit: $maxFiles)");
-
-      if (dashcamFiles.length > maxFiles) {
-        // Sort by the timestamp in the filename (most reliable)
-        dashcamFiles.sort((a, b) {
-          try {
-            final tsA = int.parse(p.basenameWithoutExtension(a.path).split('_').last);
-            final tsB = int.parse(p.basenameWithoutExtension(b.path).split('_').last);
-            return tsA.compareTo(tsB);
-          } catch (_) {
-            // Fallback to file system modification time
-            return a.lastModifiedSync().compareTo(b.lastModifiedSync());
-          }
-        });
-
-        int toDeleteCount = dashcamFiles.length - maxFiles;
-
-        for (int i = 0; i < toDeleteCount; i++) {
-          final fileToDelete = dashcamFiles[i];
-          final pathToDelete = fileToDelete.path;
-          
-          try {
-            await fileToDelete.delete();
-            debugPrint("Successfully deleted: $pathToDelete");
-            
-            // Notify gallery that the file is gone
-            await platform.invokeMethod('scanFile', {"path": pathToDelete});
-          } catch (e) {
-            debugPrint("Failed to delete file from disk: $pathToDelete. Error: $e");
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("Critical error in deleteOldFiles: $e");
-    }
   }
 
   @override
@@ -499,10 +595,21 @@ class _DashcamScreenState extends State<DashcamScreen> {
       );
     }
 
-    // Calculate the scale to fill the screen
     final size = MediaQuery.of(context).size;
-    var scale = size.aspectRatio * controller!.value.aspectRatio;
-    if (scale < 1) scale = 1 / scale;
+    final deviceRatio = size.width / size.height;
+    
+    // In landscape, we need to handle the camera's natural aspect ratio correctly.
+    // The camera plugin often returns aspectRatio as height/width (e.g. 0.56) 
+    // even when the screen is in landscape. We ensure we use the landscape ratio (> 1).
+    double cameraRatio = controller!.value.aspectRatio;
+    if (cameraRatio < 1) cameraRatio = 1 / cameraRatio;
+    
+    double scale;
+    if (deviceRatio < cameraRatio) {
+      scale = cameraRatio / deviceRatio;
+    } else {
+      scale = deviceRatio / cameraRatio;
+    }
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -520,75 +627,100 @@ class _DashcamScreenState extends State<DashcamScreen> {
             ),
           ),
 
-          // 2. Top Overlay (Settings Icon)
+          // 2. Left Side: Settings
           Positioned(
-            top: 40,
-            left: 20,
-            child: Tooltip(
-              message: "Settings",
-              triggerMode: TooltipTriggerMode.tap,
-              child: GestureDetector(
-                onTap: isRecording ? null : _showSettings,
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: const BoxDecoration(
-                    color: Colors.black45,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.settings,
-                    color: Colors.white,
-                    size: 24,
+            left: 30,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Tooltip(
+                message: "Settings",
+                triggerMode: TooltipTriggerMode.tap,
+                child: GestureDetector(
+                  onTap: isRecording ? null : _showSettings,
+                  child: Container(
+                    padding: const EdgeInsets.all(15),
+                    decoration: BoxDecoration(
+                      color: Colors.black45,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: const Icon(
+                      Icons.settings,
+                      color: Colors.white,
+                      size: 30,
+                    ),
                   ),
                 ),
               ),
             ),
           ),
 
-          // 3. Recording Indicator
-          if (isRecording)
-            Positioned(
-              top: 45,
-              right: 20,
-              child: Row(
-                children: [
-                  const Icon(Icons.circle, color: Colors.red, size: 14),
-                  const SizedBox(width: 8),
-                  Text(
-                    "REC",
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      shadows: [Shadow(blurRadius: 10, color: Colors.black)],
+          // 3. Top Right: REC Indicator and Clock
+          Positioned(
+            top: 20,
+            right: 30,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (isRecording)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.black38,
+                      borderRadius: BorderRadius.circular(5),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.circle, color: Colors.red, size: 14),
+                        SizedBox(width: 8),
+                        Text(
+                          "REC",
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
-            ),
-
-          // 4. Bottom Controls
-          Positioned(
-            bottom: 40,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                // Start Button
-                FloatingActionButton(
-                  heroTag: "start",
-                  backgroundColor: isRecording ? Colors.grey : Colors.green,
-                  onPressed: isRecording ? null : startLoopRecording,
-                  child: const Icon(Icons.play_arrow, size: 30),
-                ),
-                // Stop Button
-                FloatingActionButton(
-                  heroTag: "stop",
-                  backgroundColor: isRecording ? Colors.red : Colors.grey,
-                  onPressed: isRecording ? stopLoopRecording : null,
-                  child: const Icon(Icons.stop, size: 30),
+                const SizedBox(height: 10),
+                Text(
+                  _currentTime,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w500,
+                    shadows: [Shadow(blurRadius: 10, color: Colors.black)],
+                  ),
                 ),
               ],
+            ),
+          ),
+
+          // 4. Right Side: Start/Stop Button
+          Positioned(
+            right: 30,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!isRecording)
+                    FloatingActionButton.large(
+                      heroTag: "start",
+                      backgroundColor: Colors.green,
+                      onPressed: startLoopRecording,
+                      child: const Icon(Icons.play_arrow, size: 40),
+                    )
+                  else
+                    FloatingActionButton.large(
+                      heroTag: "stop",
+                      backgroundColor: Colors.red,
+                      onPressed: stopLoopRecording,
+                      child: const Icon(Icons.stop, size: 40),
+                    ),
+                ],
+              ),
             ),
           ),
         ],

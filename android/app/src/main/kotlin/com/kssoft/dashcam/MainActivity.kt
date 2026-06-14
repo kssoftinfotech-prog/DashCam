@@ -16,14 +16,14 @@ class MainActivity: FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 if (call.method == "scanFile") {
                     val path = call.argument<String>("path")
-                    MediaScannerConnection.scanFile(
-                        applicationContext,
-                        arrayOf(path),
-                        arrayOf("video/mp4"),
-                        { path, uri ->
-                            // Optional: log or handle scan completion
-                        }
-                    )
+                    if (path != null) {
+                        MediaScannerConnection.scanFile(
+                            applicationContext,
+                            arrayOf(path),
+                            null,
+                            { _, _ -> }
+                        )
+                    }
                     result.success(null)
                 }
             }
