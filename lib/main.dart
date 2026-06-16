@@ -14,32 +14,80 @@ import 'package:intl/intl.dart';
 late List<CameraDescription> cameras;
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  // Lock orientation to landscape mode
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ]);
+    // Lock orientation to landscape mode
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
 
-  cameras = await availableCameras();
-  runApp(const DashcamApp());
+    try {
+      cameras = await availableCameras();
+    } catch (e) {
+      debugPrint("Available cameras error: $e");
+      cameras = []; // Initialize as empty list to avoid late initialization error
+    }
+    
+    runApp(const DashcamApp());
+  } catch (e) {
+    debugPrint("Critical startup error: $e");
+  }
 }
 
-class DashcamApp extends StatelessWidget {
+class DashcamApp extends StatefulWidget {
   const DashcamApp({super.key});
+
+  @override
+  State<DashcamApp> createState() => _DashcamAppState();
+}
+
+class _DashcamAppState extends State<DashcamApp> {
+  late Future<Map<String, dynamic>> _initDataFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _initDataFuture = _initAppData();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: FutureBuilder<bool>(
-        future: _isFirstTime(),
+      theme: ThemeData.dark(),
+      home: FutureBuilder<Map<String, dynamic>>(
+        future: _initDataFuture,
         builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Scaffold(
+              body: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Text("Error starting app: ${snapshot.error}", textAlign: TextAlign.center),
+                ),
+              ),
+            );
+          }
+
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
-          if (snapshot.data == true) {
+
+          final data = snapshot.data!;
+          final isFirstTime = data['first_time'] as bool;
+          final camerasAvailable = data['cameras_available'] as bool;
+
+          if (!camerasAvailable) {
+            return const Scaffold(
+              body: Center(
+                child: Text("No cameras found on this device.", style: TextStyle(color: Colors.white, fontSize: 18)),
+              ),
+            );
+          }
+
+          if (isFirstTime) {
             return const OnboardingScreen();
           }
           return const DashcamScreen();
@@ -48,9 +96,20 @@ class DashcamApp extends StatelessWidget {
     );
   }
 
-  Future<bool> _isFirstTime() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('first_time') ?? true;
+  Future<Map<String, dynamic>> _initAppData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 5));
+      return {
+        'first_time': prefs.getBool('first_time') ?? true,
+        'cameras_available': cameras.isNotEmpty,
+      };
+    } catch (e) {
+      debugPrint("Settings load timeout: $e");
+      return {
+        'first_time': false, // Assume not first time to get into dashcam mode
+        'cameras_available': true, // Assume true to try initializing
+      };
+    }
   }
 }
 
@@ -250,33 +309,41 @@ class _DashcamScreenState extends State<DashcamScreen> {
   }
 
   Future<void> init() async {
-    await requestPermissions();
+    try {
+      await requestPermissions();
 
-    // Keep screen on while the app is running
-    WakelockPlus.enable();
+      // Keep screen on while the app is running
+      WakelockPlus.enable();
 
-    // Hide status bar and navigation bar for true full screen
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      // Hide status bar and navigation bar for true full screen
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-    // Start clock timer for the UI overlay
-    _clockTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) {
-        setState(() {
-          _currentTime = DateFormat('dd-MM-yyyy HH:mm:ss').format(DateTime.now());
-        });
+      // Start clock timer for the UI overlay
+      _clockTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (mounted) {
+          setState(() {
+            _currentTime = DateFormat('dd-MM-yyyy HH:mm:ss').format(DateTime.now());
+          });
+        }
+      });
+
+      if (cameras.isEmpty) {
+        debugPrint("No cameras available to initialize");
+        return;
       }
-    });
 
-    if (controller == null) {
       controller = CameraController(
         cameras.first,
         selectedResolution,
         enableAudio: true,
       );
+
       await controller!.initialize();
+      
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint("Initialization error: $e");
     }
-    
-    if (mounted) setState(() {});
   }
 
   void _showSettings() { 
@@ -286,10 +353,12 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
     showDialog(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          scrollable: true,
-          title: const Text("Dashcam Settings"),
+      builder: (context) => Theme(
+        data: ThemeData.light(),
+        child: StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            scrollable: true,
+            title: const Text("Settings"),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -437,8 +506,9 @@ class _DashcamScreenState extends State<DashcamScreen> {
           ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
   Widget _presetButton(String label, int value, int current, Function(int) onTap) {
     bool isSelected = value == current;
