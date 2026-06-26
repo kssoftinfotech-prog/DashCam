@@ -1,42 +1,32 @@
-# Fix PlatformException for SharedPreferences in Release Build
+# Smart Storage Management Implementation
 
-The `PlatformException` (channel-error) in the Play Store version is caused by R8/ProGuard stripping or obfuscating classes required by the `shared_preferences` plugin, specifically the Pigeon-generated platform channel interfaces.
+Implement a logic where the app records until the device's storage is nearly full, then automatically deletes the oldest segments to make room for new ones.
 
 ## User Review Required
 
 > [!IMPORTANT]
-> I am changing `compileSdk` from 36 to 35. SDK 36 is not yet a stable release, and using it might cause unexpected behavior with build tools like R8. SDK 35 corresponds to Android 15.
+> The "Max Number of Files" setting will be removed as storage management is now automatic.
+> A 500MB safety buffer will be maintained to prevent device performance issues.
 
 ## Proposed Changes
 
-### Android Configuration
+### Android Platform
 
-#### [proguard-rules.pro](file:///C:/Users/sujil/StudioProjects/DASHCAM/android/app/proguard-rules.pro)
+#### [MainActivity.kt](file:///C:/Users/sujil/StudioProjects/DASHCAM/android/app/src/main/kotlin/com/kssoft/dashcam/MainActivity.kt)
 
-- Fix the typo in `io.flutter.plugins.shared_preferences` (added missing underscore).
-- Add more explicit rules for Pigeon-generated classes to prevent them from being stripped.
-- Ensure all members are kept for these critical classes.
+- Add `getFreeDiskSpace` method to the platform channel to return available bytes.
 
-```diff
--# 2. Fix SharedPreferences (dev.flutter.pigeon.shared_preferences_android)
--# This is the exact fix for the error in your screenshot
---keep class dev.flutter.pigeon.** { *; }
---keep class io.flutter.plugins.sharedpreferences.** { *; }
-+# 2. Fix SharedPreferences and Pigeon-based plugins
-+-keep class dev.flutter.pigeon.** { *; }
-+-keep interface dev.flutter.pigeon.** { *; }
-+-keep class io.flutter.plugins.shared_preferences.** { *; }
-```
-
-#### [build.gradle.kts](file:///C:/Users/sujil/StudioProjects/DASHCAM/android/app/build.gradle.kts)
-
-- Downgrade `compileSdk` to 35 (Android 15) to ensure compatibility with stable Flutter and plugin tools.
-
-```diff
- android {
-     namespace = "com.kssoft.dashcam"
--    compileSdk = 36
-+    compileSdk = 35
+```kotlin
+                    "getFreeDiskSpace" -> {
+                        try {
+                            val path = Environment.getExternalStorageDirectory().path
+                            val stat = StatFs(path)
+                            val bytesAvailable = stat.blockSizeLong * stat.availableBlocksLong
+                            result.success(bytesAvailable)
+                        } catch (e: Exception) {
+                            result.error("STORAGE_ERROR", "Failed to get storage info", e.message)
+                        }
+                    }
 ```
 
 ---
@@ -45,37 +35,44 @@ The `PlatformException` (channel-error) in the Play Store version is caused by R
 
 #### [main.dart](file:///C:/Users/sujil/StudioProjects/DASHCAM/lib/main.dart)
 
-- Convert `DashcamApp` to a `StatefulWidget` to ensure `_initAppData()` is only called once and its Future is preserved. This prevents redundant calls and potential race conditions during startup.
-- Improve error handling in `_initAppData` to catch `PlatformException` more robustly.
+- Remove `maxFiles` state variable and associated controllers.
+- Update `_deleteOldFiles` to check disk space using the new platform method.
+- Maintain a 500MB buffer before deleting old files.
+- Simplify Settings dialog to remove "Max Number of Files".
 
 ```dart
-class DashcamApp extends StatefulWidget {
-  const DashcamApp({super.key});
+  Future<void> _deleteOldFiles(Directory dir) async {
+    try {
+      const int minFreeSpace = 500 * 1024 * 1024; // 500 MB Buffer
 
-  @override
-  State<DashcamApp> createState() => _DashcamAppState();
-}
+      while (true) {
+        final int? freeSpace = await platform.invokeMethod<int>('getFreeDiskSpace');
+        if (freeSpace == null || freeSpace > minFreeSpace) break;
 
-class _DashcamAppState extends State<DashcamApp> {
-  late Future<Map<String, dynamic>> _initDataFuture;
+        final List<FileSystemEntity> entities = dir.listSync();
+        final List<File> dashcamFiles = entities
+            .whereType<File>()
+            .where((file) => p.basename(file.path).startsWith("VID_"))
+            .toList();
 
-  @override
-  void initState() {
-    super.initState();
-    _initDataFuture = _initAppData();
+        if (dashcamFiles.isEmpty) break;
+
+        dashcamFiles.sort((a, b) => a.statSync().modified.compareTo(b.statSync().modified));
+        await dashcamFiles.first.delete();
+        await platform.invokeMethod('scanFile', {"path": dashcamFiles.first.path});
+      }
+    } catch (e) {
+      debugPrint("Cleanup error: $e");
+    }
   }
-  ...
-}
 ```
 
 ## Verification Plan
 
 ### Automated Tests
-- I will run `flutter analyze` to ensure no regressions in Dart code.
+- `flutter analyze` to ensure code correctness.
 
 ### Manual Verification
-- Since this issue only occurs in **Release builds** (ProGuard/R8), I recommend building a release APK and testing it on a physical device.
-- Run: `flutter build apk --release`
-- Install the resulting APK: `flutter install`
-- Check if the app starts without the error message.
-- If the error persists, check `adb logcat` for more detailed stripping warnings.
+- Verify the "Max Number of Files" setting is gone.
+- Verify video recording still works.
+- Verify that older files are deleted when storage is low (can be simulated by lowering the buffer threshold temporarily).

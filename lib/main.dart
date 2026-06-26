@@ -281,7 +281,6 @@ class _DashcamScreenState extends State<DashcamScreen> {
   bool isRecording = false;
 
   int recordDuration = 120;
-  int maxFiles = 5;
   ResolutionPreset selectedResolution = ResolutionPreset.high;
 
   Timer? _clockTimer;
@@ -290,7 +289,6 @@ class _DashcamScreenState extends State<DashcamScreen> {
   static const platform = MethodChannel('media_scanner');
 
   final TextEditingController _durationController = TextEditingController(text: "120");
-  final TextEditingController _maxFilesController = TextEditingController(text: "5");
 
   @override
   void initState() {
@@ -304,7 +302,6 @@ class _DashcamScreenState extends State<DashcamScreen> {
     _clockTimer?.cancel();
     controller?.dispose();
     _durationController.dispose();
-    _maxFilesController.dispose();
     super.dispose();
   }
 
@@ -349,7 +346,6 @@ class _DashcamScreenState extends State<DashcamScreen> {
   void _showSettings() { 
     ResolutionPreset tempResolution = selectedResolution;
     int tempDuration = recordDuration;
-    int tempMaxFiles = maxFiles;
 
     showDialog(
       context: context,
@@ -401,36 +397,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
               const Divider(height: 40),
 
-              // 2. Max Number of Files
-              const Text("Max Number of Files", style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  IconButton(
-                    onPressed: () {
-                      if (tempMaxFiles > 1) setDialogState(() => tempMaxFiles -= 1);
-                    },
-                    icon: const Icon(Icons.remove_circle_outline, size: 30),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade300),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text("$tempMaxFiles files", style: const TextStyle(fontSize: 18)),
-                  ),
-                  IconButton(
-                    onPressed: () => setDialogState(() => tempMaxFiles += 1),
-                    icon: const Icon(Icons.add_circle_outline, size: 30),
-                  ),
-                ],
-              ),
-
-              const Divider(height: 40),
-
-              // 3. Resolution
+              // 2. Resolution
               const Text("Camera Resolution", style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 10),
               Container(
@@ -485,10 +452,8 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
                 setState(() {
                   recordDuration = tempDuration;
-                  maxFiles = tempMaxFiles;
                   selectedResolution = tempResolution;
                   _durationController.text = tempDuration.toString();
-                  _maxFilesController.text = tempMaxFiles.toString();
                 });
                 Navigator.pop(context);
 
@@ -574,14 +539,13 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
         final startTime = DateTime.now();
         
-        // Use prepare to warm up the encoder
-        await controller!.prepareForVideoRecording();
-        
         // 1. Start the recording
         await controller!.startVideoRecording();
         
-        // 2. Wait for the duration minus a small offset
-        await Future.delayed(Duration(milliseconds: (recordDuration * 1000) - 500));
+        // 2. Wait for the duration
+        // We wait for the full duration. The slight overhead of stopping/starting 
+        // is now minimized by removing the 'prepareForVideoRecording' call inside the loop.
+        await Future.delayed(Duration(seconds: recordDuration));
         
         if (!isRecording) break;
 
@@ -589,9 +553,10 @@ class _DashcamScreenState extends State<DashcamScreen> {
         final file = await controller!.stopVideoRecording();
         
         // 4. Process in background (burn timestamp)
+        // We move processing entirely to background to allow loop to continue immediately
         unawaited(_processVideo(file.path, folderPath, startTime));
         
-        // Loop immediately continues
+        // Loop immediately continues to start the next recording
       } catch (e) {
         debugPrint("Loop error: $e");
         await Future.delayed(const Duration(seconds: 1));
@@ -627,21 +592,33 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
   Future<void> _deleteOldFiles(Directory dir) async {
     try {
-      final List<FileSystemEntity> entities = dir.listSync();
-      final List<File> dashcamFiles = entities
-          .whereType<File>()
-          .where((file) => p.basename(file.path).startsWith("VID_"))
-          .toList();
+      const int minFreeSpace = 500 * 1024 * 1024; // 500 MB Buffer
 
-      if (dashcamFiles.length > maxFiles) {
+      while (true) {
+        // Get current free space from native side
+        final int? freeSpace = await platform.invokeMethod<int>('getFreeDiskSpace');
+        
+        if (freeSpace == null || freeSpace > minFreeSpace) break; // Enough space or error
+
+        final List<FileSystemEntity> entities = dir.listSync();
+        final List<File> dashcamFiles = entities
+            .whereType<File>()
+            .where((file) => p.basename(file.path).startsWith("VID_"))
+            .toList();
+
+        if (dashcamFiles.isEmpty) break; // No more files to delete
+
+        // Sort by modification time and delete the oldest one
         dashcamFiles.sort((a, b) => a.statSync().modified.compareTo(b.statSync().modified));
-        int toDeleteCount = dashcamFiles.length - maxFiles;
-        for (int i = 0; i < toDeleteCount; i++) {
-          await dashcamFiles[i].delete();
-          await platform.invokeMethod('scanFile', {"path": dashcamFiles[i].path});
-        }
+        
+        final fileToDelete = dashcamFiles.first;
+        debugPrint("Deleting oldest file to free space: ${fileToDelete.path}");
+        await fileToDelete.delete();
+        await platform.invokeMethod('scanFile', {"path": fileToDelete.path});
       }
-    } catch (e) {}
+    } catch (e) {
+      debugPrint("Cleanup error: $e");
+    }
   }
 
   Future<void> stopLoopRecording() async {
