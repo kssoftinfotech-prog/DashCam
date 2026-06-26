@@ -1,29 +1,27 @@
-# Walkthrough - Fixed PlatformException for SharedPreferences
+# Walkthrough - Smart Storage Management
 
-I have implemented the fixes to address the `PlatformException` encountered in the Play Store (Release) version of the app.
+I have implemented a dynamic storage-based recording logic that replaces the manual "Max Number of Files" setting. The app now automatically manages disk space to ensure it uses the available memory efficiently while keeping the device stable.
 
-## Changes Made
+## Key Changes
 
-### 1. Fixed ProGuard Rules
-In [proguard-rules.pro](file:///C:/Users/sujil/StudioProjects/DASHCAM/android/app/proguard-rules.pro), I corrected a typo in the `shared_preferences` package name and added more comprehensive rules to prevent the stripping of Pigeon-generated platform channel classes. This is the primary fix for the "Unable to establish connection on channel" error.
+### 1. Native Storage Monitoring
+In [MainActivity.kt](file:///C:/Users/sujil/StudioProjects/DASHCAM/android/app/src/main/kotlin/com/kssoft/dashcam/MainActivity.kt), I added a platform method `getFreeDiskSpace` that uses the Android `StatFs` API to accurately check the available bytes on the device's external storage.
 
-### 2. Updated SDK and Java Versions
-- Reverted `compileSdk` to **36** to support the latest `camera_android` plugin requirements.
-- Updated Java compatibility to **Java 17** to resolve obsolete version warnings and ensure compatibility with newer Android build tools.
+### 2. Intelligent Loop Recording
+In [main.dart](file:///C:/Users/sujil/StudioProjects/DASHCAM/lib/main.dart), the `_deleteOldFiles` logic has been refactored:
+- **Automatic Cleanup**: Before each new segment is processed, the app checks the available storage.
+- **500MB Safety Buffer**: If the remaining space falls below 500MB, the app automatically deletes the oldest video file(s) until enough space is cleared.
+- **Maximized Recording**: Users no longer need to guess how many files to keep; the app will store as much video as the phone's memory allows.
 
-## Troubleshooting Installation
-If you see `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, it is due to a signature mismatch between the Play Store version and your local debug version. **Uninstall the app from your device** before running `flutter run` again.
-
-### 3. Refactored App Initialization
-In [main.dart](file:///C:/Users/sujil/StudioProjects/DASHCAM/lib/main.dart), I converted `DashcamApp` from a `StatelessWidget` to a `StatefulWidget`. This ensures that the app data initialization (`_initAppData`) only happens once when the app starts, rather than every time the widget tree rebuilds.
+### 3. Simplified User Interface
+The Settings dialog has been simplified by removing the "Max Number of Files" option, as storage management is now completely automatic and worry-free for the user.
 
 ## Verification Results
 
 ### Automated Analysis
-- Ran `flutter analyze` to ensure Dart code integrity. The results were clean (except for a pre-existing lint configuration warning).
+- Ran static analysis on `main.dart` and `MainActivity.kt`. No errors or warnings were found.
 
 ### Manual Verification Recommended
-To fully verify the fix, you should build a new release version:
-1. Run `flutter build apk --release` (or `flutter build appbundle`).
-2. Install the APK on a device and confirm the error is gone.
-3. Upload the new version to the Play Store.
+1. **Record a Trip**: Start recording and ensure segments are created normally.
+2. **Check Settings**: Open the settings dialog and verify that "Max Number of Files" is no longer there.
+3. **Storage Logic**: If possible, test on a device with low storage to verify that the app correctly deletes the oldest files when space is tight.
