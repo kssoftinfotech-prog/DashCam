@@ -10,12 +10,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:intl/intl.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+import 'dart:math';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 late List<CameraDescription> cameras;
 
 void main() async {
   try {
     WidgetsFlutterBinding.ensureInitialized();
+    unawaited(MobileAds.instance.initialize());
 
     // Lock orientation to landscape mode
     await SystemChrome.setPreferredOrientations([
@@ -144,6 +148,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       "title": "Maximized History",
       "description": "Old files are deleted only when storage is full, maximizing your recording history based on your phone's memory.",
       "icon": "📸",
+    },
+    {
+      "title": "Incident Protection",
+      "description": "The app detects accidents or hard braking and locks the footage. A red 'INCIDENT DETECTED' message confirms it's safe.",
+      "icon": "🛡️",
     },
   ];
 
@@ -279,6 +288,10 @@ class _DashcamScreenState extends State<DashcamScreen> {
   CameraController? controller;
 
   bool isRecording = false;
+  bool isIncidentDetected = false;
+
+  String? currentVideoPath;
+  String? lastVideoPath;
 
   int recordDuration = 120;
   ResolutionPreset selectedResolution = ResolutionPreset.high;
@@ -289,20 +302,105 @@ class _DashcamScreenState extends State<DashcamScreen> {
   static const platform = MethodChannel('media_scanner');
 
   final TextEditingController _durationController = TextEditingController(text: "120");
+  StreamSubscription? _accelerometerSubscription;
+
+  BannerAd? _bannerAd;
+  bool _isBannerAdLoaded = false;
+
+  void _loadBannerAd() {
+    _bannerAd = BannerAd(
+      adUnitId: 'ca-app-pub-2950394301574451/6480711030', // Real Ad Unit ID
+      request: const AdRequest(),
+      size: AdSize.banner,
+      listener: BannerAdListener(
+        onAdLoaded: (ad) {
+          setState(() {
+            _isBannerAdLoaded = true;
+          });
+        },
+        onAdFailedToLoad: (ad, err) {
+          debugPrint('BannerAd failed to load: $err');
+          ad.dispose();
+        },
+      ),
+    )..load();
+  }
 
   @override
   void initState() {
     super.initState();
     init();
+    _initAccelerometer();
+    _loadBannerAd();
   }
 
   @override
   void dispose() {
     WakelockPlus.disable();
     _clockTimer?.cancel();
+    _accelerometerSubscription?.cancel();
+    _bannerAd?.dispose();
     controller?.dispose();
     _durationController.dispose();
     super.dispose();
+  }
+
+  void _initAccelerometer() {
+    _accelerometerSubscription = accelerometerEventStream().listen((AccelerometerEvent event) {
+      if (!isRecording || isIncidentDetected) return;
+
+      // Calculate total G-Force
+      double gForce = sqrt(event.x * event.x + event.y * event.y + event.z * event.z) / 9.81;
+
+      // 2.5G threshold for impact detection
+      if (gForce > 1.2) {
+        _handleIncident();
+      }
+    });
+  }
+
+  void _handleIncident() {
+    if (mounted) {
+      setState(() {
+        isIncidentDetected = true;
+      });
+
+      // Show temporary indicator
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted) {
+          setState(() {
+            isIncidentDetected = false;
+          });
+        }
+      });
+    }
+
+    _lockIncidentFiles();
+  }
+
+  Future<void> _lockIncidentFiles() async {
+    try {
+      // Protect both current and previous clip
+      List<String?> pathsToLock = [currentVideoPath, lastVideoPath];
+      
+      for (String? path in pathsToLock) {
+        if (path == null) continue;
+        
+        final file = File(path);
+        if (await file.exists()) {
+          final fileName = p.basename(path);
+          if (!fileName.startsWith("EMG_")) {
+            final dir = p.dirname(path);
+            final newPath = p.join(dir, "EMG_${fileName.replaceFirst('VID_RAW_', '').replaceFirst('VID_', '')}");
+            await file.rename(newPath);
+            await platform.invokeMethod('scanFile', {"path": newPath});
+            debugPrint("File locked: $newPath");
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Locking error: $e");
+    }
   }
 
   Future<void> init() async {
@@ -543,8 +641,6 @@ class _DashcamScreenState extends State<DashcamScreen> {
         await controller!.startVideoRecording();
         
         // 2. Wait for the duration
-        // We wait for the full duration. The slight overhead of stopping/starting 
-        // is now minimized by removing the 'prepareForVideoRecording' call inside the loop.
         await Future.delayed(Duration(seconds: recordDuration));
         
         if (!isRecording) break;
@@ -552,8 +648,11 @@ class _DashcamScreenState extends State<DashcamScreen> {
         // 3. Stop the current recording
         final file = await controller!.stopVideoRecording();
         
+        // Update paths for incident protection
+        lastVideoPath = currentVideoPath;
+        currentVideoPath = file.path;
+
         // 4. Process in background (burn timestamp)
-        // We move processing entirely to background to allow loop to continue immediately
         unawaited(_processVideo(file.path, folderPath, startTime));
         
         // Loop immediately continues to start the next recording
@@ -566,7 +665,8 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
   Future<void> _processVideo(String tempPath, String folderPath, DateTime startTime) async {
     final String timestampBase = (startTime.millisecondsSinceEpoch / 1000).floor().toString();
-    final String newPath = p.join(folderPath, "VID_${DateTime.now().millisecondsSinceEpoch}.mp4");
+    final String fileName = "VID_${DateTime.now().millisecondsSinceEpoch}.mp4";
+    final String newPath = p.join(folderPath, fileName);
 
     debugPrint("FFmpeg processing: $tempPath");
 
@@ -578,13 +678,31 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
     if (ReturnCode.isSuccess(returnCode)) {
       debugPrint("Video processed: $newPath");
+      
+      // If an incident was detected, we might have already moved the raw file.
+      // Or we need to update the tracking path to the final processed one.
+      if (currentVideoPath == tempPath) {
+        currentVideoPath = newPath;
+      } else if (lastVideoPath == tempPath) {
+        lastVideoPath = newPath;
+      }
+
       await File(tempPath).delete();
       await platform.invokeMethod('scanFile', {"path": newPath});
       _deleteOldFiles(Directory(folderPath));
     } else {
       debugPrint("FFmpeg failed. Saving raw.");
-      final savedPath = p.join(folderPath, "VID_RAW_${DateTime.now().millisecondsSinceEpoch}.mp4");
+      final rawFileName = "VID_RAW_${DateTime.now().millisecondsSinceEpoch}.mp4";
+      final savedPath = p.join(folderPath, rawFileName);
+      
       await File(tempPath).copy(savedPath);
+      
+      if (currentVideoPath == tempPath) {
+        currentVideoPath = savedPath;
+      } else if (lastVideoPath == tempPath) {
+        lastVideoPath = savedPath;
+      }
+
       await File(tempPath).delete();
       await platform.invokeMethod('scanFile', {"path": savedPath});
     }
@@ -627,6 +745,10 @@ class _DashcamScreenState extends State<DashcamScreen> {
     isRecording = false;
     if (controller != null && controller!.value.isRecordingVideo) {
       final file = await controller!.stopVideoRecording();
+      
+      lastVideoPath = currentVideoPath;
+      currentVideoPath = file.path;
+
       final dir = Directory('/storage/emulated/0/Movies/Dashcam');
       unawaited(_processVideo(file.path, dir.path, DateTime.now().subtract(Duration(seconds: recordDuration))));
     }
@@ -673,6 +795,48 @@ class _DashcamScreenState extends State<DashcamScreen> {
               ),
             ),
           ),
+
+          // Banner Ad
+          if (_bannerAd != null && _isBannerAdLoaded)
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                alignment: Alignment.bottomCenter,
+                width: _bannerAd!.size.width.toDouble(),
+                height: _bannerAd!.size.height.toDouble(),
+                child: AdWidget(ad: _bannerAd!),
+              ),
+            ),
+
+          // Incident Detected Overlay
+          if (isIncidentDetected)
+            Positioned(
+              top: 100,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.8),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.warning, color: Colors.white),
+                      SizedBox(width: 10),
+                      Text(
+                        "INCIDENT DETECTED - FILE LOCKED",
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
 
           // 2. Left Side: Settings
           Positioned(

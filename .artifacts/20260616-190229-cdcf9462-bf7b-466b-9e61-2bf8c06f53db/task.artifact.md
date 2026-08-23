@@ -7,7 +7,6 @@
 - [x] Address New Issues
 - [x] UI Theme Change
 - [x] Smart Storage Implementation
-- [/] Optimize Recording Gap
-    - [ ] Research seamless recording transition
-    - [ ] Implement optimized `_runRecordingLoop`
-- [ ] Finalize Walkthrough
+- [x] Optimize Recording Gap
+- [x] Crash Detection Implementation
+- [x] Finalize Walkthrough

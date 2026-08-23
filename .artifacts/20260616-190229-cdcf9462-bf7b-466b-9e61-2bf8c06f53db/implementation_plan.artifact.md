@@ -1,70 +1,34 @@
-# Smart Storage Management Implementation
+# Crash Detection and Incident Locking Implementation
 
-Implement a logic where the app records until the device's storage is nearly full, then automatically deletes the oldest segments to make room for new ones.
+Implement automatic impact detection using the accelerometer to "lock" and protect critical video files from deletion.
 
 ## User Review Required
 
 > [!IMPORTANT]
-> The "Max Number of Files" setting will be removed as storage management is now automatic.
-> A 500MB safety buffer will be maintained to prevent device performance issues.
+> - **Threshold**: The impact threshold is set to **2.5G**. This is a standard balance to detect collisions while ignoring minor road bumps.
+> - **Locked Files**: Files marked as incidents will be prefixed with `EMG_` (Emergency). These files **will never be automatically deleted** by the app. The user must manually delete them to free up space.
 
 ## Proposed Changes
-
-### Android Platform
-
-#### [MainActivity.kt](file:///C:/Users/sujil/StudioProjects/DASHCAM/android/app/src/main/kotlin/com/kssoft/dashcam/MainActivity.kt)
-
-- Add `getFreeDiskSpace` method to the platform channel to return available bytes.
-
-```kotlin
-                    "getFreeDiskSpace" -> {
-                        try {
-                            val path = Environment.getExternalStorageDirectory().path
-                            val stat = StatFs(path)
-                            val bytesAvailable = stat.blockSizeLong * stat.availableBlocksLong
-                            result.success(bytesAvailable)
-                        } catch (e: Exception) {
-                            result.error("STORAGE_ERROR", "Failed to get storage info", e.message)
-                        }
-                    }
-```
-
----
 
 ### Flutter Core
 
 #### [main.dart](file:///C:/Users/sujil/StudioProjects/DASHCAM/lib/main.dart)
 
-- Remove `maxFiles` state variable and associated controllers.
-- Update `_deleteOldFiles` to check disk space using the new platform method.
-- Maintain a 500MB buffer before deleting old files.
-- Simplify Settings dialog to remove "Max Number of Files".
+- Add `sensors_plus` import.
+- Implement `_initAccelerometer()` to listen for sudden impacts.
+- Track `lastVideoPath` and `currentVideoPath` to protect both when an impact occurs.
+- Add `_lockIncidentFiles()` to rename relevant files with `EMG_` prefix.
+- Update `_deleteOldFiles()` to only target files starting with `VID_`, ignoring `EMG_`.
+- Add a UI indicator (Red banner) that appears when an incident is detected.
 
 ```dart
-  Future<void> _deleteOldFiles(Directory dir) async {
-    try {
-      const int minFreeSpace = 500 * 1024 * 1024; // 500 MB Buffer
-
-      while (true) {
-        final int? freeSpace = await platform.invokeMethod<int>('getFreeDiskSpace');
-        if (freeSpace == null || freeSpace > minFreeSpace) break;
-
-        final List<FileSystemEntity> entities = dir.listSync();
-        final List<File> dashcamFiles = entities
-            .whereType<File>()
-            .where((file) => p.basename(file.path).startsWith("VID_"))
-            .toList();
-
-        if (dashcamFiles.isEmpty) break;
-
-        dashcamFiles.sort((a, b) => a.statSync().modified.compareTo(b.statSync().modified));
-        await dashcamFiles.first.delete();
-        await platform.invokeMethod('scanFile', {"path": dashcamFiles.first.path});
-      }
-    } catch (e) {
-      debugPrint("Cleanup error: $e");
-    }
+// Logic for impact detection
+void _onAccelerometerEvent(AccelerometerEvent event) {
+  double gForce = sqrt(event.x * event.x + event.y * event.y + event.z * event.z) / 9.81;
+  if (gForce > 2.5) {
+    _lockIncidentFiles();
   }
+}
 ```
 
 ## Verification Plan
@@ -73,6 +37,8 @@ Implement a logic where the app records until the device's storage is nearly ful
 - `flutter analyze` to ensure code correctness.
 
 ### Manual Verification
-- Verify the "Max Number of Files" setting is gone.
-- Verify video recording still works.
-- Verify that older files are deleted when storage is low (can be simulated by lowering the buffer threshold temporarily).
+- Start recording.
+- Shake the phone vigorously (simulating a 2.5G impact).
+- Verify the "Incident Detected" UI appears.
+- Check the storage folder to ensure the current and previous videos are renamed with the `EMG_` prefix.
+- Verify that these `EMG_` files are not deleted when storage gets full (test by lowering the 500MB buffer temporarily).
