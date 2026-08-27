@@ -13,6 +13,7 @@ import 'package:intl/intl.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'dart:math';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:geolocator/geolocator.dart';
 
 late List<CameraDescription> cameras;
 
@@ -303,6 +304,9 @@ class _DashcamScreenState extends State<DashcamScreen> {
 
   final TextEditingController _durationController = TextEditingController(text: "120");
   StreamSubscription? _accelerometerSubscription;
+  StreamSubscription? _speedSubscription;
+  double _currentSpeed = 0.0;
+  final List<double> _speedSamples = [];
 
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
@@ -330,7 +334,6 @@ class _DashcamScreenState extends State<DashcamScreen> {
   void initState() {
     super.initState();
     init();
-    _initAccelerometer();
     _loadBannerAd();
   }
 
@@ -339,6 +342,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
     WakelockPlus.disable();
     _clockTimer?.cancel();
     _accelerometerSubscription?.cancel();
+    _speedSubscription?.cancel();
     _bannerAd?.dispose();
     controller?.dispose();
     _durationController.dispose();
@@ -353,8 +357,50 @@ class _DashcamScreenState extends State<DashcamScreen> {
       double gForce = sqrt(event.x * event.x + event.y * event.y + event.z * event.z) / 9.81;
 
       // 2.5G threshold for impact detection
-      if (gForce > 1.2) {
+      if (gForce > 1.5) {
         _handleIncident();
+      }
+    });
+  }
+
+  void _initSpeedTracking() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    // Test if location services are enabled.
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      debugPrint('Location services are disabled.');
+      return;
+    }
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        debugPrint('Location permissions are denied');
+        return;
+      }
+    }
+    
+    if (permission == LocationPermission.deniedForever) {
+      debugPrint('Location permissions are permanently denied');
+      return;
+    } 
+
+    await _speedSubscription?.cancel();
+    _speedSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 0,
+      ),
+    ).listen((Position position) {
+      if (mounted) {
+        setState(() {
+          // speed is in m/s, convert to km/h
+          // position.speed can be negative or 0 if not moving or no signal
+          _currentSpeed = position.speed > 0 ? position.speed * 3.6 : 0.0;
+        });
       }
     });
   }
@@ -406,6 +452,8 @@ class _DashcamScreenState extends State<DashcamScreen> {
   Future<void> init() async {
     try {
       await requestPermissions();
+      _initAccelerometer();
+      _initSpeedTracking();
 
       // Keep screen on while the app is running
       WakelockPlus.enable();
@@ -598,6 +646,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
       await [
         Permission.camera,
         Permission.microphone,
+        Permission.locationWhenInUse,
         Permission.videos,
         Permission.photos,
       ].request();
@@ -605,6 +654,7 @@ class _DashcamScreenState extends State<DashcamScreen> {
       await [
         Permission.camera,
         Permission.microphone,
+        Permission.locationWhenInUse,
         Permission.storage,
       ].request();
     }
@@ -636,12 +686,17 @@ class _DashcamScreenState extends State<DashcamScreen> {
         if (controller == null || !controller!.value.isInitialized) break;
 
         final startTime = DateTime.now();
+        _speedSamples.clear();
         
         // 1. Start the recording
         await controller!.startVideoRecording();
         
-        // 2. Wait for the duration
-        await Future.delayed(Duration(seconds: recordDuration));
+        // 2. Wait for the duration while sampling speed every second
+        for (int i = 0; i < recordDuration; i++) {
+          if (!isRecording) break;
+          _speedSamples.add(_currentSpeed);
+          await Future.delayed(const Duration(seconds: 1));
+        }
         
         if (!isRecording) break;
 
@@ -652,8 +707,10 @@ class _DashcamScreenState extends State<DashcamScreen> {
         lastVideoPath = currentVideoPath;
         currentVideoPath = file.path;
 
-        // 4. Process in background (burn timestamp)
-        unawaited(_processVideo(file.path, folderPath, startTime));
+        // 4. Process in background (burn timestamp and speed)
+        // Make a copy of speed samples for this specific video
+        final List<double> videoSpeedSamples = List.from(_speedSamples);
+        unawaited(_processVideo(file.path, folderPath, startTime, videoSpeedSamples));
         
         // Loop immediately continues to start the next recording
       } catch (e) {
@@ -663,15 +720,24 @@ class _DashcamScreenState extends State<DashcamScreen> {
     }
   }
 
-  Future<void> _processVideo(String tempPath, String folderPath, DateTime startTime) async {
+  Future<void> _processVideo(String tempPath, String folderPath, DateTime startTime, List<double> speedSamples) async {
     final String timestampBase = (startTime.millisecondsSinceEpoch / 1000).floor().toString();
     final String fileName = "VID_${DateTime.now().millisecondsSinceEpoch}.mp4";
     final String newPath = p.join(folderPath, fileName);
 
-    debugPrint("FFmpeg processing: $tempPath");
+    debugPrint("FFmpeg processing: $tempPath with ${speedSamples.length} speed samples");
 
-    // FFmpeg command to burn timestamp
-    final String command = "-i $tempPath -vf \"drawtext=fontfile=/system/fonts/Roboto-Regular.ttf:text='%{pts\\:localtime\\:$timestampBase}':x=w-tw-20:y=h-th-20:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5\" -c:v libx264 -preset ultrafast -c:a copy $newPath";
+    // FFmpeg filter to burn timestamp
+    String filter = "drawtext=fontfile=/system/fonts/Roboto-Regular.ttf:text='%{pts\\:localtime\\:$timestampBase}':x=w-tw-20:y=h-th-20:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5";
+
+    // Add speed overlay segments
+    // We add a drawtext for each second with an 'enable' filter
+    for (int i = 0; i < speedSamples.length; i++) {
+      final String speedText = "${speedSamples[i].toStringAsFixed(1)} km/h";
+      filter += ",drawtext=fontfile=/system/fonts/Roboto-Regular.ttf:text='$speedText':x=20:y=h-th-20:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:enable='between(t,$i,${i + 1})'";
+    }
+
+    final String command = "-i $tempPath -vf \"$filter\" -c:v libx264 -preset ultrafast -c:a copy $newPath";
 
     final session = await FFmpegKit.execute(command);
     final returnCode = await session.getReturnCode();
@@ -750,7 +816,8 @@ class _DashcamScreenState extends State<DashcamScreen> {
       currentVideoPath = file.path;
 
       final dir = Directory('/storage/emulated/0/Movies/Dashcam');
-      unawaited(_processVideo(file.path, dir.path, DateTime.now().subtract(Duration(seconds: recordDuration))));
+      final List<double> videoSpeedSamples = List.from(_speedSamples);
+      unawaited(_processVideo(file.path, dir.path, DateTime.now().subtract(Duration(seconds: recordDuration)), videoSpeedSamples));
     }
     setState(() {});
   }
@@ -838,32 +905,63 @@ class _DashcamScreenState extends State<DashcamScreen> {
               ),
             ),
 
-          // 2. Left Side: Settings
+          // 2. Left Side: Settings and Speed
           Positioned(
             left: 30,
             top: 0,
             bottom: 0,
-            child: Center(
-              child: Tooltip(
-                message: "Settings",
-                triggerMode: TooltipTriggerMode.tap,
-                child: GestureDetector(
-                  onTap: isRecording ? null : _showSettings,
-                  child: Container(
-                    padding: const EdgeInsets.all(15),
-                    decoration: BoxDecoration(
-                      color: Colors.black45,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white24),
-                    ),
-                    child: const Icon(
-                      Icons.settings,
-                      color: Colors.white,
-                      size: 30,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Tooltip(
+                  message: "Settings",
+                  triggerMode: TooltipTriggerMode.tap,
+                  child: GestureDetector(
+                    onTap: isRecording ? null : _showSettings,
+                    child: Container(
+                      padding: const EdgeInsets.all(15),
+                      decoration: BoxDecoration(
+                        color: Colors.black45,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: const Icon(
+                        Icons.settings,
+                        color: Colors.white,
+                        size: 30,
+                      ),
                     ),
                   ),
                 ),
-              ),
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black45,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        _currentSpeed.toStringAsFixed(0),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 32,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const Text(
+                        "km/h",
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
 

@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   ffmpeg_kit_flutter_new
+  geolocator_windows
   permission_handler_windows
 )
 
